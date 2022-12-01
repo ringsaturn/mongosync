@@ -1,8 +1,10 @@
+// MongoSync is tool for sync data between Mongo instances.
 package main
 
 import (
 	"context"
 	"flag"
+	"log"
 	"time"
 
 	"github.com/ringsaturn/valve"
@@ -27,6 +29,10 @@ var (
 	// Last OID
 	LastOIDHex string
 
+	InChanSize  int
+	OutChanSize int
+	BatchSize   int
+
 	Workers int
 )
 
@@ -47,7 +53,14 @@ func worker(ctx context.Context, valveCore *valve.Core, coll *mongo.Collection) 
 			return ctx.Err()
 		case batchItem := <-out:
 			valveCore.DoneInCounter()
-			coll.InsertMany(ctx, batchItem)
+			_, err = coll.InsertMany(ctx, batchItem)
+			if err != nil {
+				log.Println("failed", err)
+				continue
+			}
+			log.Println("insert done", len(batchItem))
+		default:
+			time.Sleep(time.Second)
 		}
 	}
 }
@@ -55,26 +68,36 @@ func worker(ctx context.Context, valveCore *valve.Core, coll *mongo.Collection) 
 func start(ctx context.Context) {
 	sourceClient, err := mongo.NewClient(options.Client().ApplyURI(SourceURI))
 	ok(err)
-
 	err = sourceClient.Connect(ctx)
 	ok(err)
+	log.Println("sourceClient init OK")
 
 	targetClient, err := mongo.NewClient(options.Client().ApplyURI(TargetURI))
 	ok(err)
-
 	err = targetClient.Connect(ctx)
 	ok(err)
+	log.Println("targetClient init OK")
 
-	cursor, err := sourceClient.Database(SourceDB).Collection(SourceCollection).Find(ctx, bson.M{})
+	query := bson.M{}
+	if LastOIDHex != primitive.NilObjectID.Hex() {
+		oid, err := primitive.ObjectIDFromHex(LastOIDHex)
+		ok(err)
+		query["_id"] = oid
+	}
+	cursor, err := sourceClient.Database(SourceDB).Collection(SourceCollection).Find(ctx, query)
 	ok(err)
 
 	// Buffer queue
-	valveCore, err := valve.NewCore(time.NewTicker(100*time.Millisecond), 100, 2000, 2000)
+	valveCore, err := valve.NewCore(time.NewTicker(100*time.Millisecond), int64(BatchSize), InChanSize, OutChanSize)
 	if err != nil {
 		panic(err)
 	}
 
 	group, groupCtx := errgroup.WithContext(ctx)
+
+	group.Go(func() error {
+		return valveCore.Start(groupCtx)
+	})
 
 	group.Go(func() error {
 		for cursor.Next(groupCtx) {
@@ -108,6 +131,9 @@ func main() {
 	flag.StringVar(&LastOIDHex, "LastOIDHex", primitive.NilObjectID.Hex(), "from which moid")
 
 	flag.IntVar(&Workers, "Workers", 10, "how many workers")
+	flag.IntVar(&InChanSize, "InChanSize", 2000, "in chan buffer size")
+	flag.IntVar(&OutChanSize, "OutChanSize", 2000, "out chan buffer size")
+	flag.IntVar(&BatchSize, "BatchSize", 20, "batch size")
 
 	flag.Parse()
 
