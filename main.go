@@ -82,7 +82,7 @@ func start(ctx context.Context) {
 	if LastOIDHex != primitive.NilObjectID.Hex() {
 		oid, err := primitive.ObjectIDFromHex(LastOIDHex)
 		ok(err)
-		query["_id"] = oid
+		query["_id"] = bson.M{"$gt": oid}
 	}
 	cursor, err := sourceClient.Database(SourceDB).Collection(SourceCollection).Find(ctx, query)
 	ok(err)
