@@ -1,6 +1,8 @@
 # mongosync
 
 ```bash
+go install github.com/ringsaturn/mongosync
+
 mongosync -SourceDB foo -SourceCollection bar1 -TargetDB foo -TargetCollection bar2
 ```
 
