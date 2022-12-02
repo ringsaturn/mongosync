@@ -2,9 +2,9 @@
 //
 // Features:
 //
-// - Limit read&write QPS
-// - Use `InsertMany` to BulkWrite
-// - Single small binary
+//   - Limit read&write QPS
+//   - Use `InsertMany` to BulkWrite
+//   - Single small binary
 package main
 
 import (
