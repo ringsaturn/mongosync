@@ -5,10 +5,12 @@ go 1.19
 require (
 	github.com/ringsaturn/valve v0.0.0-20220319162728-dc0e1335932a
 	go.mongodb.org/mongo-driver v1.11.0
+	go.uber.org/ratelimit v0.2.0
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 )
 
 require (
+	github.com/andres-erbsen/clock v0.0.0-20160526145045-9e14626cd129 // indirect
 	github.com/golang/snappy v0.0.1 // indirect
 	github.com/google/go-cmp v0.5.5 // indirect
 	github.com/klauspost/compress v1.13.6 // indirect

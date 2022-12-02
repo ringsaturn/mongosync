@@ -1,4 +1,10 @@
 // MongoSync is tool for sync data between Mongo instances.
+//
+// Features:
+//
+// - Limit read&write QPS
+// - Use `InsertMany` to BulkWrite
+// - Single small binary
 package main
 
 import (
@@ -12,6 +18,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
+	"go.uber.org/ratelimit"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -26,15 +33,38 @@ var (
 	TargetDB         string
 	TargetCollection string
 
-	// Last OID
 	LastOIDHex string
 
+	Workers     int
 	InChanSize  int
 	OutChanSize int
 	BatchSize   int
 
-	Workers int
+	ReadSpeed  int
+	WriteSpeed int
 )
+
+func init() {
+	flag.StringVar(&SourceURI, "SourceURI", "mongodb://localhost:27017", "which instance data come from")
+	flag.StringVar(&SourceDB, "SourceDB", "", "which database data come from")
+	flag.StringVar(&SourceCollection, "SourceCollection", "", "which collection data come from")
+
+	flag.StringVar(&TargetURI, "TargetURI", "mongodb://localhost:27017", "which instance data come from")
+	flag.StringVar(&TargetDB, "TargetDB", "", "which database data come from")
+	flag.StringVar(&TargetCollection, "TargetCollection", "", "which collection data come from")
+
+	flag.StringVar(&LastOIDHex, "LastOIDHex", primitive.NilObjectID.Hex(), "from which moid")
+
+	flag.IntVar(&Workers, "Workers", 10, "how many workers")
+	flag.IntVar(&InChanSize, "InChanSize", 2000, "in chan buffer size")
+	flag.IntVar(&OutChanSize, "OutChanSize", 2000, "out chan buffer size")
+	flag.IntVar(&BatchSize, "BatchSize", 20, "batch size")
+
+	flag.IntVar(&ReadSpeed, "ReadSpeed", 500, "read QPS")
+	flag.IntVar(&WriteSpeed, "WriteSpeed", 100, "write QPS")
+
+	flag.Parse()
+}
 
 func ok(err error) {
 	if err != nil {
@@ -42,30 +72,10 @@ func ok(err error) {
 	}
 }
 
-func worker(ctx context.Context, valveCore *valve.Core, coll *mongo.Collection) error {
-	out, err := valveCore.Receive()
-	if err != nil {
-		return err
-	}
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case batchItem := <-out:
-			valveCore.DoneInCounter()
-			_, err = coll.InsertMany(ctx, batchItem)
-			if err != nil {
-				log.Println("failed", err)
-				continue
-			}
-			log.Println("insert done", len(batchItem))
-		default:
-			time.Sleep(time.Second)
-		}
-	}
-}
-
 func start(ctx context.Context) {
+	ReadLimiter := ratelimit.New(ReadSpeed)
+	WriteLimiter := ratelimit.New(WriteSpeed)
+
 	sourceClient, err := mongo.NewClient(options.Client().ApplyURI(SourceURI))
 	ok(err)
 	err = sourceClient.Connect(ctx)
@@ -101,17 +111,42 @@ func start(ctx context.Context) {
 
 	group.Go(func() error {
 		for cursor.Next(groupCtx) {
+			// Block here if too quick
+			ReadLimiter.Take()
 			record := &bson.M{}
 			err = cursor.Decode(record)
 			ok(err)
-			valveCore.Add(groupCtx, record)
+			// Block here if buffer is full
+			_ = valveCore.BAdd(record)
 		}
 		return nil
 	})
 
+	targetColl := targetClient.Database(TargetDB).Collection(TargetCollection)
 	for i := 0; i < Workers; i++ {
 		group.Go(func() error {
-			return worker(groupCtx, valveCore, targetClient.Database(TargetDB).Collection(TargetCollection))
+			out, err := valveCore.Receive()
+			if err != nil {
+				return err
+			}
+			for {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case batchItem := <-out:
+					valveCore.DoneInCounter()
+					// Block here if too quick
+					_ = WriteLimiter.Take()
+					_, err = targetColl.InsertMany(ctx, batchItem)
+					if err != nil {
+						log.Println("failed", err)
+						continue
+					}
+					log.Println("insert done", len(batchItem))
+				default:
+					time.Sleep(time.Second)
+				}
+			}
 		})
 	}
 	ok(group.Wait())
@@ -119,23 +154,5 @@ func start(ctx context.Context) {
 
 func main() {
 	ctx := context.Background()
-
-	flag.StringVar(&SourceURI, "SourceURI", "mongodb://localhost:27017", "which instance data come from")
-	flag.StringVar(&SourceDB, "SourceDB", "", "which database data come from")
-	flag.StringVar(&SourceCollection, "SourceCollection", "", "which collection data come from")
-
-	flag.StringVar(&TargetURI, "TargetURI", "mongodb://localhost:27017", "which instance data come from")
-	flag.StringVar(&TargetDB, "TargetDB", "", "which database data come from")
-	flag.StringVar(&TargetCollection, "TargetCollection", "", "which collection data come from")
-
-	flag.StringVar(&LastOIDHex, "LastOIDHex", primitive.NilObjectID.Hex(), "from which moid")
-
-	flag.IntVar(&Workers, "Workers", 10, "how many workers")
-	flag.IntVar(&InChanSize, "InChanSize", 2000, "in chan buffer size")
-	flag.IntVar(&OutChanSize, "OutChanSize", 2000, "out chan buffer size")
-	flag.IntVar(&BatchSize, "BatchSize", 20, "batch size")
-
-	flag.Parse()
-
 	start(ctx)
 }
